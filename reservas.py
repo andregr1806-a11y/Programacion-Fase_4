@@ -17,33 +17,26 @@ if not logger.handlers:
 
 class ErrorReserva(Exception):
     """Excepcion base para errores del modulo de reservas."""
-    pass
-
-
-class ServicioNoDisponibleError(ErrorReserva):
-    """Se lanza cuando se intenta reservar o usar un servicio no disponible."""
-    pass
-
-
-class ReservaNoEncontradaError(ErrorReserva):
-    """Se lanza cuando no existe una reserva con el codigo consultado."""
-    pass
-
-
-class EstadoReservaInvalidoError(ErrorReserva):
-    """Se lanza cuando la operacion no es valida para el estado actual de la reserva."""
-    pass
 
 
 class ParametroReservaInvalidoError(ErrorReserva):
-    """Se lanza cuando los datos de entrada de la reserva son invalidos."""
-    pass
+    """Datos de entrada invalidos en la reserva."""
+
+
+class ServicioNoDisponibleError(ErrorReserva):
+    """El servicio solicitado no esta disponible."""
+
+
+class ReservaNoEncontradaError(ErrorReserva):
+    """No existe la reserva consultada en memoria."""
+
+
+class EstadoReservaInvalidoError(ErrorReserva):
+    """Transicion o estado no permitido para la reserva."""
 
 
 class Reserva:
-    """Representa una reserva en memoria asociada a un servicio de Software FJ."""
-
-    ESTADOS_VALIDOS = ("PENDIENTE", "CONFIRMADA", "CANCELADA")
+    """Representa una reserva en memoria para Software FJ."""
 
     def __init__(
         self,
@@ -63,11 +56,10 @@ class Reserva:
         if servicio is None or not hasattr(servicio, "calcular_costo") or not hasattr(servicio, "describir"):
             raise ParametroReservaInvalidoError("El servicio asociado no es valido.")
         if isinstance(duracion, bool) or not isinstance(duracion, (int, float)) or duracion <= 0:
-            raise ParametroReservaInvalidoError("La duracion de la reserva debe ser mayor que cero.")
-
+            raise ParametroReservaInvalidoError("La duracion debe ser mayor que cero.")
         if getattr(servicio, "disponible", True) is False:
             raise ServicioNoDisponibleError(
-                f"El servicio '{getattr(servicio, 'codigo', 'SIN_CODIGO')}' no se encuentra disponible."
+                f"El servicio '{getattr(servicio, 'codigo', 'SIN_CODIGO')}' no esta disponible."
             )
 
         self._codigo_reserva = codigo_reserva.strip()
@@ -79,12 +71,19 @@ class Reserva:
         self._recargo_extra = recargo_extra
         self._estado = "PENDIENTE"
         self._fecha_registro = fecha_registro or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self._costo_total = self._servicio.calcular_costo(
-            duracion=self._duracion,
-            impuesto=self._impuesto,
-            descuento=self._descuento,
-            recargo_extra=self._recargo_extra
-        )
+
+        try:
+            self._costo_total = self._servicio.calcular_costo(
+                duracion=self._duracion,
+                impuesto=self._impuesto,
+                descuento=self._descuento,
+                recargo_extra=self._recargo_extra
+            )
+        except Exception as exc:
+            # Encadenamiento de excepciones para conservar la causa original
+            raise ParametroReservaInvalidoError(
+                f"Error al calcular el costo de la reserva '{self._codigo_reserva}'."
+            ) from exc
 
     @property
     def codigo_reserva(self) -> str:
@@ -99,10 +98,6 @@ class Reserva:
         return self._servicio
 
     @property
-    def duracion(self) -> int:
-        return self._duracion
-
-    @property
     def estado(self) -> str:
         return self._estado
 
@@ -113,11 +108,11 @@ class Reserva:
     def confirmar(self) -> None:
         if self._estado == "CANCELADA":
             raise EstadoReservaInvalidoError(
-                f"No se puede confirmar la reserva '{self._codigo_reserva}' porque esta cancelada."
+                f"No se puede confirmar '{self._codigo_reserva}' porque esta cancelada."
             )
         if self._estado == "CONFIRMADA":
             raise EstadoReservaInvalidoError(
-                f"La reserva '{self._codigo_reserva}' ya se encuentra confirmada."
+                f"La reserva '{self._codigo_reserva}' ya esta confirmada."
             )
         self._estado = "CONFIRMADA"
         if hasattr(self._servicio, "disponible"):
@@ -126,7 +121,7 @@ class Reserva:
     def cancelar(self) -> None:
         if self._estado == "CANCELADA":
             raise EstadoReservaInvalidoError(
-                f"La reserva '{self._codigo_reserva}' ya fue cancelada anteriormente."
+                f"La reserva '{self._codigo_reserva}' ya fue cancelada."
             )
         self._estado = "CANCELADA"
         if hasattr(self._servicio, "disponible"):
@@ -136,15 +131,13 @@ class Reserva:
         cod_srv = getattr(self._servicio, "codigo", "SRV")
         nom_srv = getattr(self._servicio, "nombre", "Servicio")
         return (
-            f"[Reserva {self._codigo_reserva}] Cliente: {self._cliente} | "
-            f"Servicio: {cod_srv} ({nom_srv}) | Duracion: {self._duracion}h | "
-            f"Total: ${self._costo_total:.2f} | Estado: {self._estado} | "
-            f"Fecha: {self._fecha_registro}"
+            f"[{self._codigo_reserva}] Cliente: {self._cliente} | Servicio: {cod_srv} ({nom_srv}) | "
+            f"Total: ${self._costo_total:.2f} | Estado: {self._estado}"
         )
 
 
 class GestorReservas:
-    """Administra las reservas en memoria y registra los eventos en el log."""
+    """Administra reservas en memoria con trazabilidad en log."""
 
     def __init__(self):
         self._reservas: Dict[str, Reserva] = {}
@@ -163,9 +156,8 @@ class GestorReservas:
             codigo_limpio = codigo_reserva.strip() if isinstance(codigo_reserva, str) else ""
             if codigo_limpio in self._reservas:
                 raise ParametroReservaInvalidoError(
-                    f"Ya existe una reserva registrada con el codigo '{codigo_limpio}'."
+                    f"Ya existe una reserva con el codigo '{codigo_limpio}'."
                 )
-
             reserva = Reserva(
                 codigo_reserva=codigo_reserva,
                 cliente=cliente,
@@ -175,19 +167,25 @@ class GestorReservas:
                 descuento=descuento,
                 recargo_extra=recargo_extra
             )
+        except ErrorReserva as exc:
+            logger.error(f"CREAR_RESERVA fallo | codigo={codigo_reserva} | motivo={exc}")
+            raise
+        except Exception as exc:
+            logger.critical(f"CREAR_RESERVA inesperado | codigo={codigo_reserva} | detalle={exc}")
+            raise ParametroReservaInvalidoError("Fallo interno al crear la reserva.") from exc
+        else:
             self._reservas[reserva.codigo_reserva] = reserva
             logger.info(
                 f"CREAR_RESERVA ok | codigo={reserva.codigo_reserva} | "
                 f"cliente={reserva.cliente} | total={reserva.costo_total:.2f}"
             )
             return reserva
-        except Exception as exc:
-            logger.error(f"CREAR_RESERVA error | codigo={codigo_reserva} | detalle={exc}")
-            raise
+        finally:
+            logger.info(f"AUDITORIA crear_reserva finalizada | intento_codigo={codigo_reserva}")
 
     def obtener_reserva(self, codigo_reserva: str) -> Reserva:
         if not isinstance(codigo_reserva, str) or codigo_reserva.strip() not in self._reservas:
-            msg = f"No se encontro la reserva con codigo '{codigo_reserva}'."
+            msg = f"No se encontro la reserva '{codigo_reserva}'."
             logger.warning(f"CONSULTAR_RESERVA no_encontrada | {msg}")
             raise ReservaNoEncontradaError(msg)
         return self._reservas[codigo_reserva.strip()]
@@ -196,35 +194,44 @@ class GestorReservas:
         try:
             reserva = self.obtener_reserva(codigo_reserva)
             reserva.confirmar()
+        except ErrorReserva as exc:
+            logger.error(f"CONFIRMAR_RESERVA fallo | codigo={codigo_reserva} | motivo={exc}")
+            raise
+        else:
             logger.info(f"CONFIRMAR_RESERVA ok | codigo={reserva.codigo_reserva}")
             return reserva
-        except Exception as exc:
-            logger.error(f"CONFIRMAR_RESERVA error | codigo={codigo_reserva} | detalle={exc}")
-            raise
+        finally:
+            logger.info(f"AUDITORIA confirmar_reserva finalizada | codigo={codigo_reserva}")
 
     def cancelar_reserva(self, codigo_reserva: str) -> Reserva:
         try:
             reserva = self.obtener_reserva(codigo_reserva)
             reserva.cancelar()
+        except ErrorReserva as exc:
+            logger.error(f"CANCELAR_RESERVA fallo | codigo={codigo_reserva} | motivo={exc}")
+            raise
+        else:
             logger.info(f"CANCELAR_RESERVA ok | codigo={reserva.codigo_reserva}")
             return reserva
-        except Exception as exc:
-            logger.error(f"CANCELAR_RESERVA error | codigo={codigo_reserva} | detalle={exc}")
-            raise
+        finally:
+            logger.info(f"AUDITORIA cancelar_reserva finalizada | codigo={codigo_reserva}")
 
     def listar_reservas(self) -> List[Reserva]:
         return list(self._reservas.values())
 
 
 if __name__ == "__main__":
-    class _ServicioPrueba:
-        def __init__(self, codigo: str, nombre: str, tarifa: float, disponible: bool = True):
+    class _ServicioSimulacion:
+        def __init__(self, codigo: str, nombre: str, tarifa: float, disponible: bool = True, romper_calculo: bool = False):
             self.codigo = codigo
             self.nombre = nombre
             self.tarifa = tarifa
             self.disponible = disponible
+            self.romper_calculo = romper_calculo
 
         def calcular_costo(self, duracion: int, impuesto: float = 0.19, descuento: float = 0.0, recargo_extra: float = 0.0) -> float:
+            if self.romper_calculo:
+                raise ZeroDivisionError("Simulacion de falla matematica en tarifa")
             base = (self.tarifa * duracion) + recargo_extra
             return round(base * (1 - descuento) * (1 + impuesto), 2)
 
@@ -232,15 +239,34 @@ if __name__ == "__main__":
             return f"{self.codigo} - {self.nombre}"
 
     gestor = GestorReservas()
-    srv1 = _ServicioPrueba("S01", "Sala Ejecutiva", 50000, True)
-    srv2 = _ServicioPrueba("E01", "Servidor Cloud", 80000, False)
+    sala = _ServicioSimulacion("SAL-01", "Sala Conferencias", 60000, True)
+    equipo = _ServicioSimulacion("EQP-01", "Laptop Profesional", 25000, True)
+    no_disp = _ServicioSimulacion("SRV-09", "Servidor Dedicado", 120000, False)
+    bug_srv = _ServicioSimulacion("BUG-01", "Servicio con Falla", 40000, True, romper_calculo=True)
 
-    r1 = gestor.crear_reserva("R001", "Carlos Mendez", srv1, 2, descuento=0.10)
-    print(r1.resumen())
-    gestor.confirmar_reserva("R001")
-    print("Tras confirmar:", r1.resumen())
+    simulaciones = [
+        ("Sim 1 - Reserva valida sala", lambda: print("OK:", gestor.crear_reserva("R01", "Andres Garcia", sala, 3, descuento=0.1).resumen())),
+        ("Sim 2 - Confirmar reserva R01", lambda: print("OK:", gestor.confirmar_reserva("R01").resumen())),
+        ("Sim 3 - Reserva valida equipo", lambda: print("OK:", gestor.crear_reserva("R02", "Laura Perez", equipo, 2).resumen())),
+        ("Sim 4 - Cancelar reserva R02", lambda: print("OK:", gestor.cancelar_reserva("R02").resumen())),
+        ("Sim 5 - Error servicio no disponible", lambda: gestor.crear_reserva("R03", "Carlos Ruiz", no_disp, 1)),
+        ("Sim 6 - Error duracion invalida", lambda: gestor.crear_reserva("R04", "Sofia Gomez", sala, -2)),
+        ("Sim 7 - Error cliente vacio", lambda: gestor.crear_reserva("R05", "   ", sala, 2)),
+        ("Sim 8 - Error codigo duplicado", lambda: gestor.crear_reserva("R01", "Pedro Diaz", equipo, 1)),
+        ("Sim 9 - Error confirmar ya cancelada", lambda: gestor.confirmar_reserva("R02")),
+        ("Sim 10 - Error encadenado en calculo", lambda: gestor.crear_reserva("R06", "Elena Castro", bug_srv, 2)),
+    ]
 
-    try:
-        gestor.crear_reserva("R002", "Ana Torres", srv2, 1)
-    except ServicioNoDisponibleError as err:
-        print("Error controlado:", err)
+    for titulo, accion in simulaciones:
+        try:
+            accion()
+        except ErrorReserva as err:
+            print(f"{titulo} -> Controlado ({type(err).__name__}): {err}")
+            if err.__cause__ is not None:
+                print(f"   Causa encadenada: {type(err.__cause__).__name__}: {err.__cause__}")
+
+    print("\n--- CONTENIDO DEL LOG (ultimas lineas) ---")
+    with open("sistema_software_fj.log", "r", encoding="utf-8") as f:
+        lineas = f.readlines()
+        for linea in lineas[-25:]:
+            print(linea.strip())
